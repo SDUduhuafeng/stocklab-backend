@@ -1,16 +1,26 @@
 """
 StockLab 股票数据模块 - 基于 akshare 获取 A 股数据
 """
-import akshare as ak
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional
+
+# 懒加载 akshare（避免启动时导入耗时过长导致 Railway 超时）
+_ak = None
+
+def _get_ak():
+    """延迟导入 akshare，只有真正调用数据接口时才加载"""
+    global _ak
+    if _ak is None:
+        import akshare as ak
+        _ak = ak
+    return _ak
 
 
 def get_index_data():
     """获取三大指数实时行情"""
     try:
-        df = ak.stock_zh_index_spot_em()
+        df = _get_ak().stock_zh_index_spot_em()
         indices = {}
         targets = {
             "上证指数": "000001",
@@ -36,7 +46,7 @@ def get_index_data():
 def get_stock_realtime(codes: list):
     """获取股票实时行情（批量）"""
     try:
-        df = ak.stock_zh_a_spot_em()
+        df = _get_ak().stock_zh_a_spot_em()
         result = []
         for code in codes:
             row = df[df["代码"] == code]
@@ -67,7 +77,7 @@ def get_stock_realtime(codes: list):
 def search_stock(keyword: str):
     """搜索股票（模糊匹配）"""
     try:
-        df = ak.stock_zh_a_spot_em()
+        df = _get_ak().stock_zh_a_spot_em()
         mask = df["代码"].str.contains(keyword, na=False) | df["名称"].str.contains(keyword, na=False)
         matched = df[mask].head(20)
         result = []
@@ -96,7 +106,7 @@ def get_kline_data(code: str, period: str = "daily", start_date: str = None, end
         else:
             symbol = f"{code}.SZ"
 
-        df = ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust="qfq")
+        df = _get_ak().stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust="qfq")
         if df is None or df.empty:
             return {"success": False, "error": "未获取到K线数据"}
 
@@ -119,7 +129,7 @@ def get_kline_data(code: str, period: str = "daily", start_date: str = None, end
 def get_all_stocks():
     """获取全市场A股列表（用于筛选）"""
     try:
-        df = ak.stock_zh_a_spot_em()
+        df = _get_ak().stock_zh_a_spot_em()
         stocks = []
         for _, r in df.iterrows():
             stocks.append({
@@ -145,7 +155,7 @@ def screen_stocks(conditions: dict):
     conditions 示例: {"pe_max": 15, "roe_min": 15, "market_cap_min": 100}
     """
     try:
-        df = ak.stock_zh_a_spot_em()
+        df = _get_ak().stock_zh_a_spot_em()
         mask = pd.Series([True] * len(df))
 
         if "pe_max" in conditions:
@@ -195,7 +205,7 @@ def _build_match_reason(conditions, row):
 def get_money_flow(code: str):
     """获取个股资金流向"""
     try:
-        df = ak.stock_individual_fund_flow(stock=code, market="sh" if code.startswith("6") else "sz")
+        df = _get_ak().stock_individual_fund_flow(stock=code, market="sh" if code.startswith("6") else "sz")
         if df is None or df.empty:
             return {"success": False, "error": "未获取到资金流向数据"}
         latest = df.iloc[-1]
