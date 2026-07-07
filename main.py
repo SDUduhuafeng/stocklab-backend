@@ -86,7 +86,19 @@ class TradePlanCreate(BaseModel):
 # ============================================================
 @app.on_event("startup")
 def startup():
-    init_db()
+    try:
+        init_db()
+        print("Database initialized successfully")
+    except Exception as e:
+        print(f"Database init error (non-fatal): {e}")
+
+
+# ============================================================
+# 根路由 & 健康检查
+# ============================================================
+@app.get("/")
+def root():
+    return {"service": "StockLab API", "version": "2.0", "status": "running"}
 
 
 # ============================================================
