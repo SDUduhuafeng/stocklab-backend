@@ -1,9 +1,0 @@
-# Nixpacks 构建配置 for Railway
-[build]
-builder = "nixpacks"
-
-[build.apt]
-packages = ["build-essential", "python3-dev"]
-
-[build.phases]
-install = "pip install --upgrade pip && pip install -r requirements.txt"
