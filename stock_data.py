@@ -1,5 +1,5 @@
 """
-StockLab 股票数据模块 - 基于 akshare 获取 A 股数据
+StockLab 股票数据模块 - 基于 yfinance + akshare 获取 A 股数据
 """
 import pandas as pd
 from datetime import datetime, timedelta
@@ -19,7 +19,7 @@ def _get_ak():
         _ak = ak
     return _ak
 
-# 通用请求会话（带重试和超时）
+# 通用请求会话
 _session = None
 
 def _get_session():
@@ -27,41 +27,25 @@ def _get_session():
     if _session is None:
         _session = requests.Session()
         _session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "*/*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         })
     return _session
 
-def _fetch_with_retry(url, params=None, max_retries=2, timeout=15):
-    """带重试的 HTTP GET 请求"""
-    session = _get_session()
-    last_error = None
-    for i in range(max_retries + 1):
-        try:
-            resp = session.get(url, params=params, timeout=timeout)
-            resp.raise_for_status()
-            return resp
-        except Exception as e:
-            last_error = e
-            if i < max_retries:
-                time.sleep(1)
-    raise last_error
-
 
 def get_index_data():
-    """获取三大指数实时行情（新浪财经API，海外访问友好）"""
+    """获取三大指数实时行情（新浪财经API，全球可访问）"""
     try:
-        # 使用新浪财经API（比东方财富更适合海外访问）
         url = "https://hq.sinajs.cn/list=s_sh000001,s_sz399001,s_sz399006"
         session = _get_session()
         session.headers["Referer"] = "https://finance.sina.com.cn"
-        resp = session.get(url, timeout=10)
+        resp = session.get(url, timeout=15)
         resp.encoding = "gbk"
         text = resp.text
 
-        index_map = {"s_sh000001": "上证指数", "s_sz399001": "深证成指", "s_sz399006": "创业板指"}
-        code_map = {"s_sh000001": "000001", "s_sz399001": "399001", "s_sz399006": "399006"}
+        index_map = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指"}
+        code_map = {"sh000001": "000001", "sz399001": "399001", "sz399006": "399006"}
         indices = {}
 
         for line in text.strip().split("\n"):
@@ -88,6 +72,29 @@ def get_index_data():
         else:
             return {"success": False, "error": "未获取到指数数据"}
     except Exception as e:
+        # 新浪失败时尝试 yfinance（备份方案）
+        try:
+            import yfinance as yf
+            indices = {}
+            tickers = {"000001.SS": "上证指数", "399001.SZ": "深证成指", "399006.SZ": "创业板指"}
+            for ticker, name in tickers.items():
+                t = yf.Ticker(ticker)
+                info = t.fast_info
+                prev = info.get("previous_close", info.get("regular_market_previous_close", 0))
+                price = info.get("last_price", info.get("regular_market_price", 0))
+                change = price - prev if prev else 0
+                change_pct = (change / prev * 100) if prev else 0
+                indices[name] = {
+                    "code": ticker.split(".")[0],
+                    "name": name,
+                    "price": round(float(price), 2),
+                    "change": round(float(change), 2),
+                    "change_pct": round(float(change_pct), 2),
+                }
+            if indices:
+                return {"success": True, "data": indices}
+        except:
+            pass
         return {"success": False, "error": str(e)}
 
 
@@ -198,10 +205,7 @@ def get_all_stocks():
 
 
 def screen_stocks(conditions: dict):
-    """
-    根据条件筛选股票
-    conditions 示例: {"pe_max": 15, "roe_min": 15, "market_cap_min": 100}
-    """
+    """根据条件筛选股票"""
     try:
         df = _get_ak().stock_zh_a_spot_em()
         mask = pd.Series([True] * len(df))
@@ -211,7 +215,6 @@ def screen_stocks(conditions: dict):
         if "pe_min" in conditions:
             mask &= df["市盈率-动态"].apply(lambda x: pd.notna(x) and float(x) >= conditions["pe_min"])
         if "market_cap_min" in conditions:
-            # 市值单位是亿，转换为元
             mask &= df["总市值"].apply(lambda x: pd.notna(x) and float(x) >= conditions["market_cap_min"] * 1e8)
         if "turnover_min" in conditions:
             mask &= df["换手率"].apply(lambda x: pd.notna(x) and float(x) >= conditions["turnover_min"])
