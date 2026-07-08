@@ -1,14 +1,13 @@
 """
-StockLab 股票数据模块 - 基于 yfinance + akshare 获取 A 股数据
+StockLab 股票数据模块 - 使用 yfinance 获取 A 股数据
+yfinance 官方 Yahoo Finance API，全球节点稳定访问
 """
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional
-import requests
-import json
-import time
+import yfinance as yf
 
-# 懒加载 akshare（避免启动时导入耗时过长导致 Railway 超时）
+# 懒加载 akshare 作为备份（选股、资金流向需要）
 _ak = None
 
 def _get_ak():
@@ -19,111 +18,101 @@ def _get_ak():
         _ak = ak
     return _ak
 
-# 通用请求会话
-_session = None
-
-def _get_session():
-    global _session
-    if _session is None:
-        _session = requests.Session()
-        _session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        })
-    return _session
-
 
 def get_index_data():
-    """获取三大指数实时行情（新浪财经API，全球可访问）"""
+    """获取三大指数实时行情（yfinance 全球稳定）"""
     try:
-        url = "https://hq.sinajs.cn/list=s_sh000001,s_sz399001,s_sz399006"
-        session = _get_session()
-        session.headers["Referer"] = "https://finance.sina.com.cn"
-        resp = session.get(url, timeout=15)
-        resp.encoding = "gbk"
-        text = resp.text
+        # yfinance 指数 ticker
+        indices_map = {
+            "000001.SS": "上证指数",
+            "399001.SZ": "深证成指",
+            "399006.SZ": "创业板指",
+        }
 
-        index_map = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指"}
-        code_map = {"sh000001": "000001", "sz399001": "399001", "sz399006": "399006"}
-        indices = {}
+        result = {}
+        for ticker, name in indices_map.items():
+            ticker_obj = yf.Ticker(ticker)
+            info = ticker_obj.info
 
-        for line in text.strip().split("\n"):
-            if "=" not in line:
-                continue
-            key = line.split("=")[0].split("_")[-1]
-            data_str = line.split('"')[1] if '"' in line else ""
-            if not data_str:
-                continue
-            parts = data_str.split(",")
-            if len(parts) < 4:
-                continue
-            name = index_map.get(key, key)
-            indices[name] = {
-                "code": code_map.get(key, key),
+            # 获取最新价格和涨跌
+            price = info.get("regularMarketPrice", info.get("currentPrice", 0))
+            prev_close = info.get("regularMarketPreviousClose", 0)
+
+            if price and prev_close:
+                change = price - prev_close
+                change_pct = (change / prev_close) * 100
+            else:
+                # 用历史数据获取最新
+                hist = ticker_obj.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[-2]
+                    price = hist['Close'].iloc[-1]
+                    change = price - prev_close
+                    change_pct = (change / prev_close) * 100
+                else:
+                    price = 0
+                    change = 0
+                    change_pct = 0
+
+            code = ticker.split(".")[0]
+            result[name] = {
+                "code": code,
                 "name": name,
-                "price": float(parts[1]),
-                "change": float(parts[2]),
-                "change_pct": float(parts[3]),
+                "price": round(float(price), 2),
+                "change": round(float(change), 2),
+                "change_pct": round(float(change_pct), 2),
             }
 
-        if indices:
-            return {"success": True, "data": indices}
+        if result:
+            return {"success": True, "data": result}
         else:
-            return {"success": False, "error": "未获取到指数数据"}
+            return {"success": False, "error": "yfinance 获取指数失败"}
     except Exception as e:
-        # 新浪失败时尝试 yfinance（备份方案）
-        try:
-            import yfinance as yf
-            indices = {}
-            tickers = {"000001.SS": "上证指数", "399001.SZ": "深证成指", "399006.SZ": "创业板指"}
-            for ticker, name in tickers.items():
-                t = yf.Ticker(ticker)
-                info = t.fast_info
-                prev = info.get("previous_close", info.get("regular_market_previous_close", 0))
-                price = info.get("last_price", info.get("regular_market_price", 0))
-                change = price - prev if prev else 0
-                change_pct = (change / prev * 100) if prev else 0
-                indices[name] = {
-                    "code": ticker.split(".")[0],
-                    "name": name,
-                    "price": round(float(price), 2),
-                    "change": round(float(change), 2),
-                    "change_pct": round(float(change_pct), 2),
-                }
-            if indices:
-                return {"success": True, "data": indices}
-        except:
-            pass
         return {"success": False, "error": str(e)}
 
 
 def get_stock_realtime(codes: list):
     """获取股票实时行情（批量）"""
     try:
-        df = _get_ak().stock_zh_a_spot_em()
         result = []
         for code in codes:
-            row = df[df["代码"] == code]
-            if not row.empty:
-                r = row.iloc[0]
-                result.append({
-                    "code": code,
-                    "name": str(r["名称"]),
-                    "price": float(r["最新价"]),
-                    "change_pct": float(r["涨跌幅"]),
-                    "change": float(r["涨跌额"]),
-                    "volume": str(r["成交量"]),
-                    "amount": float(r["成交额"]),
-                    "turnover": float(r["换手率"]),
-                    "high": float(r["最高"]),
-                    "low": float(r["低"]),
-                    "open": float(r["今开"]),
-                    "pre_close": float(r["昨收"]),
-                    "pe": float(r["市盈率-动态"]) if pd.notna(r["市盈率-动态"]) else None,
-                })
+            # yfinance ticker 格式
+            if code.startswith("6"):
+                ticker = f"{code}.SS"
             else:
-                result.append({"code": code, "name": "未知", "error": "未找到该股票"})
+                ticker = f"{code}.SZ"
+
+            ticker_obj = yf.Ticker(ticker)
+            info = ticker_obj.info
+
+            price = info.get("regularMarketPrice", info.get("currentPrice", 0))
+            prev_close = info.get("regularMarketPreviousClose", 0)
+            volume = info.get("volume", 0)
+            pe = info.get("trailingPE", None)
+            market_cap = info.get("marketCap", None)
+
+            if price and prev_close:
+                change = price - prev_close
+                change_pct = (change / prev_close) * 100
+            else:
+                change = 0
+                change_pct = 0
+
+            result.append({
+                "code": code,
+                "name": info.get("shortName", "未知"),
+                "price": float(price) if price else 0,
+                "change_pct": float(change_pct) if change_pct else 0,
+                "change": float(change) if change else 0,
+                "volume": str(volume),
+                "amount": 0,
+                "turnover": 0,
+                "high": 0,
+                "low": 0,
+                "open": 0,
+                "pre_close": float(prev_close) if prev_close else 0,
+                "pe": float(pe) if pe else None,
+            })
         return {"success": True, "data": result}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -132,6 +121,7 @@ def get_stock_realtime(codes: list):
 def search_stock(keyword: str):
     """搜索股票（模糊匹配）"""
     try:
+        # yfinance 不支持搜索， fallback 到 akshare
         df = _get_ak().stock_zh_a_spot_em()
         mask = df["代码"].str.contains(keyword, na=False) | df["名称"].str.contains(keyword, na=False)
         matched = df[mask].head(20)
@@ -151,31 +141,45 @@ def search_stock(keyword: str):
 def get_kline_data(code: str, period: str = "daily", start_date: str = None, end_date: str = None):
     """获取K线数据"""
     try:
-        if start_date is None:
-            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
-        if end_date is None:
-            end_date = datetime.now().strftime("%Y%m%d")
-
         if code.startswith("6"):
-            symbol = f"{code}.SH"
+            ticker = f"{code}.SS"
         else:
-            symbol = f"{code}.SZ"
+            ticker = f"{code}.SZ"
 
-        df = _get_ak().stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust="qfq")
-        if df is None or df.empty:
+        # 转换日期格式
+        if start_date:
+            start = datetime.strptime(start_date, "%Y%m%d")
+        else:
+            start = datetime.now() - timedelta(days=365)
+
+        if end_date:
+            end = datetime.strptime(end_date, "%Y%m%d")
+        else:
+            end = datetime.now()
+
+        # yfinance 获取历史数据
+        interval = "1d"
+        if period == "weekly":
+            interval = "1wk"
+        elif period == "monthly":
+            interval = "1mo"
+
+        df = yf.download(ticker, start=start, end=end, interval=interval, progress=False)
+        if df.empty:
             return {"success": False, "error": "未获取到K线数据"}
 
         kline_data = []
-        for _, row in df.iterrows():
+        for date, row in df.iterrows():
             kline_data.append({
-                "date": str(row["日期"])[:10],
-                "open": float(row["开盘"]),
-                "close": float(row["收盘"]),
-                "high": float(row["最高"]),
-                "low": float(row["最低"]),
-                "volume": float(row["成交量"]),
-                "amount": float(row["成交额"]),
+                "date": date.strftime("%Y-%m-%d"),
+                "open": float(row["Open"]),
+                "close": float(row["Close"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "volume": float(row["Volume"]),
+                "amount": 0,
             })
+
         return {"success": True, "data": kline_data}
     except Exception as e:
         return {"success": False, "error": str(e)}
